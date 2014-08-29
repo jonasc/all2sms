@@ -1,0 +1,3 @@
+[submodule "python-gsmmodem"]
+	path = python-gsmmodem
+	url = git@github.com:faucamp/python-gsmmodem.git

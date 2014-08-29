@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import argparse
+import os
+import logging
+from configparser import ConfigParser
+import stat
+import sys
+import atexit
+from gsmmodem import GsmModem
+
+__version__ = '0.1'
+
+
+def main():
+    #===========================================================================
+    # Command line argument parser
+    #===========================================================================
+
+    # Create parser
+    argparser = argparse.ArgumentParser(
+        description='Monitor everything and notify mobile phone via SMS',
+        epilog='Options given via command line are preferred '
+               'over options set in config file.',
+        add_help=False
+    )
+    # Add optional arguments
+    argparser.add_argument(
+        '--help',
+        action='help',
+        help='show this help message and exit'
+    )
+    # General settings
+    group_general = argparser.add_argument_group('general settings')
+    group_general.add_argument(
+        '-c', '--config',
+        default='$XDG_CONFIG_HOME/all2sms/all2sms.cfg',
+        help='set the config file (default: %(default)s)'
+    )
+    # SMS settings
+    group_sms = argparser.add_argument_group('SMS settings')
+    group_sms.add_argument(
+        '-r', '--recipient',
+        help='the recipient mobile phone number'
+    )
+    # Modem settings
+    group_modem = argparser.add_argument_group('modem settings')
+    group_modem.add_argument(
+        '-p', '--port',
+        help='modem port to connect to'
+    )
+    group_modem.add_argument(
+        '-b', '--baudrate',
+        help='modem baud rate'
+    )
+    # Logging
+    group_logging = argparser.add_argument_group('logging and output settings')
+    group_logging.add_argument(
+        '-l', '--log-file',
+        default='$XDG_DATA_HOME/all2sms/all2sms.log',
+        help='set the log file (default: %(default)s)'
+    )
+    group = group_logging.add_mutually_exclusive_group()
+    group.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        default=False,
+        help='be verbose'
+    )
+    group.add_argument(
+        '-q', '--quiet',
+        action='store_true',
+        default=False,
+        help='don\'t output anything'
+    )
+    # Version
+    argparser.add_argument(
+        '--version',
+        action='version',
+        version='%(prog)s ' + __version__,
+        help='show version information and exit'
+    )
+    # Parse the arguments
+    args = argparser.parse_args()
+    # Make Path absolute
+    args.config = os.path.abspath(os.path.expandvars(args.config)) \
+        if args.config else None
+
+    #===========================================================================
+    # Logging
+    #===========================================================================
+    log_level = logging.INFO
+    if args.verbose:
+        log_level = logging.DEBUG
+    elif args.quiet:
+        log_level = logging.WARNING
+
+    log_file = os.path.abspath(os.path.expandvars(args.log_file))
+    try:
+        os.stat(log_file)
+    except OSError:
+        os.makedirs(os.path.dirname(log_file))
+
+    logging.basicConfig(
+        format='%(asctime)s - %(levelname)s: %(message)s',
+        filename=log_file,
+        filemode='a', level=log_level
+    )
+
+    log_handler = logging.StreamHandler()
+    log_handler.setLevel(log_level)
+    log_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+
+    log = logging.getLogger()
+    log.addHandler(log_handler)
+
+    log.info('Started')
+
+    #===========================================================================
+    # Config file parser
+    #===========================================================================
+    try:
+        file_stat = os.stat(args.config)
+
+        if (stat.S_IRGRP | stat.S_IROTH) & file_stat.st_mode != 0:
+            log.critical('Config file "%s" is group- or world-readable. Please '
+                         '`chmod 400` or similar.', args.config)
+            sys.exit(3)
+    except OSError as e:
+        if e.errno != 2:
+            log.critical('File stat error -  %s', e)
+            sys.exit(2)
+
+    config = ConfigParser()
+    config.read_string('''
+    [sms]
+    recipient=
+    [modem]
+    port=
+    baudrate=115200
+    [general]
+    ''')
+
+    # Read config file and WARN if it has not been loaded
+    if len(config.read(args.config)) == 0:
+        log.warn('Config file %s was not loaded', args.config)
+
+    # Overwrite the config values with the values provided via command line
+    for key in ('recipient', ):
+        if getattr(args, key, None) is not None:
+            config.set('sms', key, getattr(args, key))
+
+    for key in ('port', 'baudrate'):
+        if getattr(args, key, None) is not None:
+            config.set('modem', key, getattr(args, key))
+
+    # Set general host/user/password to specific if specific is not set
+    critical_error = False
+
+    # Exit if there are config values missing
+    if len(config.get('sms', 'recipient')) == 0:
+        log.critical('there must be a recipient specified somewhere')
+        critical_error = True
+
+    if len(config.get('modem', 'port')) == 0:
+        log.critical('there must be a modem port specified somewhere')
+        critical_error = True
+
+    if critical_error:
+        sys.exit(1)
+
+    #===========================================================================
+    # The actual program
+    #===========================================================================
+    modem = GsmModem(
+        config.get('modem', 'port'),
+        config.get('modem', 'baudrate')
+    )
+    modem.connect()
+    atexit.register(modem.close)
+    modem.smsTextMode = True
+    modem.smsTextMode = False
+    modem.sendSms(config.get('modem', 'port'), 'Message')
+
+if __name__ == '__main__':
+    main()
