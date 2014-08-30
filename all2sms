@@ -180,7 +180,7 @@ def main():
     atexit.register(modem.close)
     modem.smsTextMode = True
     modem.smsTextMode = False
-    modem.sendSms(config.get('modem', 'port'), 'Message')
+    modem.sendSms(config.get('sms', 'recipient'), 'Message')
 
 if __name__ == '__main__':
     main()
