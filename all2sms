@@ -180,7 +180,7 @@ def main():
         if getattr(args, key, None) is not None:
             config.set('modem', key, str(getattr(args, key)))
 
-    for key in ('ĥost', 'user', 'password', 'port'):
+    for key in ('host', 'user', 'password', 'port'):
         if getattr(args, 'imap_' + key, None) is not None:
             config.set('imap', key, str(getattr(args, 'imap_' + key)))
 
