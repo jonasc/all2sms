@@ -1,6 +1,6 @@
-[submodule "imapidle"]
-	path = submodules/imapidle
-	url = git@github.com:athoune/imapidle.git
 [submodule "submodules/python-gsmmodem"]
 	path = submodules/python-gsmmodem
 	url = git@github.com:jonasc/python-gsmmodem.git
+[submodule "submodules/imapidle"]
+	path = submodules/imapidle
+	url = git@github.com:jonasc/imapidle.git
