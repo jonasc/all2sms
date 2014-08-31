@@ -52,7 +52,7 @@ def main():
     )
     group_modem.add_argument(
         '-b', '--baudrate',
-        type=int,
+        type=int, default=115200,
         help='modem baud rate'
     )
     # IMAP settings
@@ -158,8 +158,13 @@ def main():
     recipient=
     [modem]
     port=
-    baudrate=115200
+    baudrate=
     [general]
+    [imap]
+    host=
+    user=
+    port=
+    password=
     ''')
 
     # Read config file and WARN if it has not been loaded
