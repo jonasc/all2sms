@@ -1,3 +1,6 @@
 [submodule "python-gsmmodem"]
-	path = python-gsmmodem
+	path = submodules/python-gsmmodem
 	url = git@github.com:faucamp/python-gsmmodem.git
+[submodule "imapidle"]
+	path = submodules/imapidle
+	url = git@github.com:athoune/imapidle.git
