@@ -174,7 +174,7 @@ def main():
     #===========================================================================
     modem = GsmModem(
         config.get('modem', 'port'),
-        int(config.get('modem', 'baudrate'))
+        config.getint('modem', 'baudrate')
     )
     modem.connect()
     atexit.register(modem.close)
