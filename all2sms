@@ -169,15 +169,15 @@ def main():
     # Overwrite the config values with the values provided via command line
     for key in ('recipient', ):
         if getattr(args, key, None) is not None:
-            config.set('sms', key, getattr(args, key))
+            config.set('sms', key, str(getattr(args, key)))
 
     for key in ('port', 'baudrate'):
         if getattr(args, key, None) is not None:
-            config.set('modem', key, getattr(args, key))
+            config.set('modem', key, str(getattr(args, key)))
 
     for key in ('ĥost', 'user', 'password', 'port'):
         if getattr(args, 'imap_' + key, None) is not None:
-            config.set('imap', key, getattr(args, 'imap_' + key))
+            config.set('imap', key, str(getattr(args, 'imap_' + key)))
 
     # Set general host/user/password to specific if specific is not set
     critical_error = False
