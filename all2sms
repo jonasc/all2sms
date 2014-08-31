@@ -8,6 +8,7 @@ import stat
 import sys
 import atexit
 from gsmmodem import GsmModem
+import imapidle
 
 __version__ = '0.1'
 
@@ -51,7 +52,27 @@ def main():
     )
     group_modem.add_argument(
         '-b', '--baudrate',
+        type=int,
         help='modem baud rate'
+    )
+    # IMAP settings
+    group_imap = argparser.add_argument_group('IMAP settings')
+    group_imap.add_argument(
+        '-ih', '--imap-host',
+        help='set the IMAP host'
+    )
+    group_imap.add_argument(
+        '-iu', '--imap-user',
+        help='set the IMAP user'
+    )
+    group_imap.add_argument(
+        '-ip', '--imap-password',
+        help='set the IMAP password'
+    )
+    group_imap.add_argument(
+        '-in', '--imap-port',
+        type=int, default=993,
+        help='set the IMAP port'
     )
     # Logging
     group_logging = argparser.add_argument_group('logging and output settings')
@@ -154,6 +175,10 @@ def main():
         if getattr(args, key, None) is not None:
             config.set('modem', key, getattr(args, key))
 
+    for key in ('ĥost', 'user', 'password', 'port'):
+        if getattr(args, 'imap_' + key, None) is not None:
+            config.set('imap', key, getattr(args, 'imap_' + key))
+
     # Set general host/user/password to specific if specific is not set
     critical_error = False
 
@@ -166,21 +191,45 @@ def main():
         log.critical('there must be a modem port specified somewhere')
         critical_error = True
 
+    if len(config.get('imap', 'host')) == 0:
+        log.critical('to which imap host should I connect?')
+        critical_error = True
+
+    if len(config.get('imap', 'user')) == 0:
+        log.critical('what is your imap username?')
+        critical_error = True
+
+    if len(config.get('imap', 'password')) == 0:
+        log.critical('specify your imap password somewhere')
+        critical_error = True
+
     if critical_error:
         sys.exit(1)
 
     #===========================================================================
     # The actual program
     #===========================================================================
-    modem = GsmModem(
-        config.get('modem', 'port'),
-        config.getint('modem', 'baudrate')
-    )
-    modem.connect()
-    atexit.register(modem.close)
-    modem.smsTextMode = True
-    modem.smsTextMode = False
-    modem.sendSms(config.get('sms', 'recipient'), 'Message')
+    try:
+        modem = GsmModem(
+            config.get('modem', 'port'),
+            config.getint('modem', 'baudrate')
+        )
+        modem.connect()
+
+        imap = imapidle.IMAP4_SSL(
+            config.get('imap', 'host'), config.getint('imap', 'port')
+        )
+        imap.login(
+            config.get('imap', 'user'), config.getint('imap', 'password')
+        )
+        imap.select(readonly=True)
+        for uid, msg in imap.idle():
+            modem.sendSms(
+                config.get('sms', 'recipient'),
+                '{} - {}'.format(uid, msg)
+            )
+    finally:
+        modem.close()
 
 if __name__ == '__main__':
     main()
