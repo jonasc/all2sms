@@ -1,97 +1,173 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import argparse
+
+from argparse import ArgumentParser
 import os
-import logging
-from configparser import ConfigParser
+import logging as log
 import stat
 import sys
-import atexit
-from gsmmodem import GsmModem
-import imapidle
+from configparser import ConfigParser
+import threading
 
-__version__ = '0.1'
+__version__ = '0.1.0'
+
+
+class Recipient(object):
+    recipients = []
+    send_lock = threading.Lock()
+
+    def __init__(self):
+        log.debug('Recipient.__init__: append %s', self)
+        Recipient.recipients.append(self)
+
+    def _deliver(self, message):
+        raise NotImplementedError('subclass has to implement deliver.')
+
+    def _finalize(self):
+        pass
+
+    def send(message):
+        log.debug('Recipient.send: sending %s', message)
+        with Recipient.send_lock:
+            for recipient in Recipient.recipients:
+                recipient._deliver(message)
+
+    def end():
+        log.debug('Recipient.end')
+        for recipient in Recipient.recipients:
+            recipient._finalize()
+
+
+class SmsModemRecipient(Recipient):
+    def __init__(self, port, baudrate, number):
+        super(SmsModemRecipient, self).__init__()
+
+        from gsmmodem import GsmModem
+
+        self.number = number
+        self.modem = GsmModem(port, baudrate)
+        self.modem.connect()
+        log.info('Connected to gsm modem at %s @ %d', port, baudrate)
+
+    def _deliver(self, message):
+        log.info('Sending message to %s', self.number)
+        self.smsTextMode = False
+        self.modem.sendSms(self.number, message)
+
+    def _finalize(self):
+        log.debug('Closing connection to modem')
+        self.modem.close()
+
+
+class Watcher(threading.Thread):
+    watchers = []
+
+    def notify(self, message):
+        Recipient.send(message)
+
+    def __init__(self):
+        self._running = True
+
+        self._thread = threading.Thread(target=self.thread)
+        self._thread.start()
+        Watcher.watchers.append(self)
+
+    def join():
+        log.debug('Watcher.join')
+        for watcher in Watcher.watchers:
+            watcher._thread.join()
+
+    def kill():
+        log.debug('Watcher.kill')
+        for watcher in Watcher.watchers:
+            watcher._running = False
+            watcher._kill()
+
+    def _kill(self):
+        pass
+
+    def thread(self):
+        raise NotImplementedError('Watcher subclass has to implement thread.')
+
+
+class OtpWatcher(Watcher):
+    def __init__(self, command):
+        super(OtpWatcher, self).__init__()
+        self.command = command.split()
+
+    def thread(self):
+        import subprocess
+        import select
+        self.process = subprocess.Popen(self.command,
+                                        stdout=subprocess.PIPE,
+                                        universal_newlines=True)
+        old_otp = ''
+        while self._running:
+            if self.process.poll() is not None:
+                self.process = subprocess.Popen(self.command,
+                                                stdout=subprocess.PIPE,
+                                                universal_newlines=True)
+
+            # Try to read from stdout
+            reads, _, _ = select.select([self.process.stdout], [], [], 1)
+            if reads == []:
+                continue
+
+            otp = self.process.stdout.readline().strip()
+            if otp == old_otp or otp == '':
+                continue
+            old_otp = otp
+            Recipient.send('OTP: ' + otp)
+
+    def _kill(self):
+        if self.process.poll() is None:
+            try:
+                self.process.kill()
+            except:
+                pass
 
 
 def main():
     #===========================================================================
-    # Command line argument parser
+    # Argument parsing
     #===========================================================================
-
-    # Create parser
-    argparser = argparse.ArgumentParser(
+    argparser = ArgumentParser(
         description='Monitor everything and notify mobile phone via SMS',
-        epilog='Options given via command line are preferred '
-               'over options set in config file.',
         add_help=False
     )
-    # Add optional arguments
+    # Getting help
     argparser.add_argument(
         '--help',
         action='help',
         help='show this help message and exit'
     )
-    # General settings
-    group_general = argparser.add_argument_group('general settings')
-    group_general.add_argument(
+    # Specifying config file
+    argparser.add_argument(
         '-c', '--config',
-        default='$XDG_CONFIG_HOME/all2sms/all2sms.cfg',
+        default='${XDG_CONFIG_HOME}/all2sms/all2sms.cfg',
         help='set the config file (default: %(default)s)'
     )
-    # SMS settings
-    group_sms = argparser.add_argument_group('SMS settings')
-    group_sms.add_argument(
-        '-r', '--recipient',
-        help='the recipient mobile phone number'
-    )
-    # Modem settings
-    group_modem = argparser.add_argument_group('modem settings')
-    group_modem.add_argument(
-        '-p', '--port',
-        help='modem port to connect to'
-    )
-    group_modem.add_argument(
-        '-b', '--baudrate',
-        type=int, default=115200,
-        help='modem baud rate'
-    )
-    # IMAP settings
-    group_imap = argparser.add_argument_group('IMAP settings')
-    group_imap.add_argument(
-        '-ih', '--imap-host',
-        help='set the IMAP host'
-    )
-    group_imap.add_argument(
-        '-iu', '--imap-user',
-        help='set the IMAP user'
-    )
-    group_imap.add_argument(
-        '-ip', '--imap-password',
-        help='set the IMAP password'
-    )
-    group_imap.add_argument(
-        '-in', '--imap-port',
-        type=int, default=993,
-        help='set the IMAP port'
-    )
-    # Logging
+    # Logging options
     group_logging = argparser.add_argument_group('logging and output settings')
     group_logging.add_argument(
         '-l', '--log-file',
-        default='$XDG_DATA_HOME/all2sms/all2sms.log',
+        default='${XDG_DATA_HOME}/all2sms/all2sms.log',
         help='set the log file (default: %(default)s)'
     )
     group = group_logging.add_mutually_exclusive_group()
     group.add_argument(
         '-v', '--verbose',
-        action='store_true',
-        default=False,
+        dest='log_level',
+        action='store_const',
+        const=log.DEBUG,
+        default=log.INFO,
         help='be verbose'
     )
     group.add_argument(
         '-q', '--quiet',
-        action='store_true',
-        default=False,
+        dest='log_level',
+        action='store_const',
+        const=log.WARNING,
         help='don\'t output anything'
     )
     # Version
@@ -101,140 +177,127 @@ def main():
         version='%(prog)s ' + __version__,
         help='show version information and exit'
     )
+
     # Parse the arguments
     args = argparser.parse_args()
-    # Make Path absolute
-    args.config = os.path.abspath(os.path.expandvars(args.config)) \
-        if args.config else None
+
+    # Expand path variables and make paths absolute
+    args.config = os.path.expandvars(args.config)
+    if args.config.startswith('${XDG_CONFIG_HOME}'):
+        args.config = args.config.replace('${XDG_CONFIG_HOME}',
+                                          os.path.expanduser('~/.config'), 1)
+    args.config = os.path.abspath(args.config)
+
+    args.log_file = os.path.expandvars(args.log_file)
+    if args.log_file.startswith('${XDG_DATA_HOME}'):
+        args.log_file = args.log_file.replace(
+            '${XDG_DATA_HOME}', os.path.expanduser('~/.local/share'), 1)
+    args.log_file = os.path.abspath(args.log_file)
 
     #===========================================================================
     # Logging
     #===========================================================================
-    log_level = logging.INFO
-    if args.verbose:
-        log_level = logging.DEBUG
-    elif args.quiet:
-        log_level = logging.WARNING
 
-    log_file = os.path.abspath(os.path.expandvars(args.log_file))
+    # Create parent folders if file does not exist
     try:
-        os.stat(log_file)
+        os.stat(args.log_file)
     except OSError:
-        os.makedirs(os.path.dirname(log_file))
+        os.makedirs(os.path.dirname(args.log_file))
 
-    logging.basicConfig(
+    # Logging configuration
+    log.basicConfig(
         format='%(asctime)s - %(levelname)s: %(message)s',
-        filename=log_file,
-        filemode='a', level=log_level
+        filename=args.log_file,
+        filemode='a', level=args.log_level
     )
 
-    log_handler = logging.StreamHandler()
-    log_handler.setLevel(log_level)
-    log_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    log_handler = log.StreamHandler()
+    log_handler.setLevel(args.log_level)
+    log_handler.setFormatter(log.Formatter('%(levelname)s: %(message)s'))
 
-    log = logging.getLogger()
-    log.addHandler(log_handler)
+    log.getLogger().addHandler(log_handler)
 
+    # Start program
     log.info('Started')
 
     #===========================================================================
-    # Config file parser
+    # Config file
     #===========================================================================
     try:
         file_stat = os.stat(args.config)
 
         if (stat.S_IRGRP | stat.S_IROTH) & file_stat.st_mode != 0:
-            log.critical('Config file "%s" is group- or world-readable. Please '
+            log.critical('config file "%s" is group- or world-readable. Please '
                          '`chmod 400` or similar.', args.config)
-            sys.exit(3)
+            sys.exit(2)
     except OSError as e:
         if e.errno != 2:
-            log.critical('File stat error -  %s', e)
-            sys.exit(2)
+            log.critical('file stat error - %s', e)
+            sys.exit(1)
+        else:
+            log.warn('config file "%s" does not exist', args.config)
 
     config = ConfigParser()
     config.read_string('''
-    [sms]
+    [modem-sms]
     recipient=
-    [modem]
     port=
-    baudrate=
-    [general]
-    [imap]
-    host=
-    user=
-    port=
-    password=
+    baudrate=115200
+    [otp]
+    command=
     ''')
 
-    # Read config file and WARN if it has not been loaded
-    if len(config.read(args.config)) == 0:
-        log.warn('Config file %s was not loaded', args.config)
+    # Read config file
+    config.read(args.config)
 
-    # Overwrite the config values with the values provided via command line
-    for key in ('recipient', ):
-        if getattr(args, key, None) is not None:
-            config.set('sms', key, str(getattr(args, key)))
-
-    for key in ('port', 'baudrate'):
-        if getattr(args, key, None) is not None:
-            config.set('modem', key, str(getattr(args, key)))
-
-    for key in ('host', 'user', 'password', 'port'):
-        if getattr(args, 'imap_' + key, None) is not None:
-            config.set('imap', key, str(getattr(args, 'imap_' + key)))
-
-    # Set general host/user/password to specific if specific is not set
     critical_error = False
 
     # Exit if there are config values missing
-    if len(config.get('sms', 'recipient')) == 0:
-        log.critical('there must be a recipient specified somewhere')
+    if len(config.get('modem-sms', 'recipient')) == 0:
+        log.critical('no sms recipient specified')
+        critical_error = True
+    elif not config.get('modem-sms', 'recipient').startswith('+'):
+        log.critical('sms recipient numbers has to be international')
         critical_error = True
 
-    if len(config.get('modem', 'port')) == 0:
-        log.critical('there must be a modem port specified somewhere')
+    if len(config.get('modem-sms', 'port')) == 0:
+        log.critical('no modem port specified')
         critical_error = True
 
-    if len(config.get('imap', 'host')) == 0:
-        log.critical('to which imap host should I connect?')
-        critical_error = True
-
-    if len(config.get('imap', 'user')) == 0:
-        log.critical('what is your imap username?')
-        critical_error = True
-
-    if len(config.get('imap', 'password')) == 0:
-        log.critical('specify your imap password somewhere')
+    if len(config.get('otp', 'command')) == 0:
+        log.critical('no otp command specified')
         critical_error = True
 
     if critical_error:
+        log.error('critical errors with missing config options - exiting')
         sys.exit(1)
 
     #===========================================================================
-    # The actual program
+    # The program
     #===========================================================================
-    try:
-        modem = GsmModem(
-            config.get('modem', 'port'),
-            config.getint('modem', 'baudrate')
-        )
-        modem.connect()
 
-        imap = imapidle.IMAP4_SSL(
-            config.get('imap', 'host'), config.getint('imap', 'port')
-        )
-        imap.login(
-            config.get('imap', 'user'), config.getint('imap', 'password')
-        )
-        imap.select(readonly=True)
-        for uid, msg in imap.idle():
-            modem.sendSms(
-                config.get('sms', 'recipient'),
-                '{} - {}'.format(uid, msg)
-            )
+    # Initialize recipient
+    #---------------------------------------------------------------------------
+    try:
+        # Recipient via SMS
+        SmsModemRecipient(config.get('modem-sms', 'port'),
+                          config.getint('modem-sms', 'baudrate'),
+                          config.get('modem-sms', 'recipient'))
+
+        # Watch for new OTPs
+        OtpWatcher(config.get('otp', 'command'))
+
+        # Wait for all watchers to end
+        Watcher.join()
+
+    except KeyboardInterrupt:
+        log.warn('Received keyboard interrupt - shutting down')
+        Watcher.kill()
+        sys.exit(1)
+
     finally:
-        modem.close()
+        Recipient.end()
+
 
 if __name__ == '__main__':
     main()
