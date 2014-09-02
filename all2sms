@@ -8,6 +8,7 @@ import stat
 import sys
 from configparser import ConfigParser
 import threading
+import re
 
 __version__ = '0.1.0'
 
@@ -38,6 +39,11 @@ class Recipient(object):
             recipient._finalize()
 
 
+class DummyRecipient(Recipient):
+    def _deliver(self, message):
+        log.info('Dummy.deliver: "{}"'.format(message))
+
+
 class SmsModemRecipient(Recipient):
     def __init__(self, port, baudrate, number):
         super(SmsModemRecipient, self).__init__()
@@ -45,7 +51,7 @@ class SmsModemRecipient(Recipient):
         from gsmmodem import GsmModem
 
         self.number = number
-        self.modem = GsmModem(port, baudrate)
+        self.modem = GsmModem(port, int(baudrate))
         self.modem.connect()
         log.info('Connected to gsm modem at %s @ %d', port, baudrate)
 
@@ -59,13 +65,14 @@ class SmsModemRecipient(Recipient):
         self.modem.close()
 
 
-class Watcher(threading.Thread):
+class Watcher(object):
     watchers = []
 
     def notify(self, message):
         Recipient.send(message)
 
     def __init__(self):
+        log.debug('Watcher.__init__: append %s', self)
         self._running = True
 
         self._thread = threading.Thread(target=self.thread)
@@ -92,8 +99,9 @@ class Watcher(threading.Thread):
 
 class OtpWatcher(Watcher):
     def __init__(self, command):
-        super(OtpWatcher, self).__init__()
         self.command = command.split()
+
+        super(OtpWatcher, self).__init__()
 
     def thread(self):
         import subprocess
@@ -125,6 +133,109 @@ class OtpWatcher(Watcher):
                 self.process.kill()
             except:
                 pass
+
+
+class ImapWatcher(Watcher):
+    folder_line_re = re.compile(
+        r'\((?P<flags>.*?)\) "(?P<delimiter>.*)" (?P<name>.*)'
+    )
+    uid_re = re.compile(r'[0-9]+ \(UID (?P<uid>[0-9]+).*')
+
+    def __init__(self, user, password, host, port, name):
+        import imaplib
+        self.conn = imaplib.IMAP4_SSL(host, port)
+        self.conn.login(user, password)
+        self.name = name
+
+        super(ImapWatcher, self).__init__()
+
+    def _parse_folder_line(line):
+        if isinstance(line, bytes):
+            line = line.decode()
+        flags, delimiter, name = ImapWatcher.folder_line_re.match(line).groups()
+        name = name.strip('"')
+        return flags, delimiter, name
+
+    def _decode_header(h):
+        import email
+        return ''.join(map(
+            lambda x: x[0].decode() if isinstance(x[0], bytes) else x[0],
+            email.header.decode_header(h)
+        ))
+
+    def thread(self):
+        import time
+        import email
+
+        first_run = True
+        old_unseen = set()
+        unseen = set()
+        while self._running:
+            time.sleep(1)
+            if not self._running:
+                break
+
+            old_unseen = unseen.copy()
+            unseen = set()
+            mapping = dict()
+
+            ok, result = self.conn.list()
+            if ok != 'OK':
+                log.debug('ImapWatcher: LIST result "%s"', ok)
+                continue
+
+            for line in result:
+                _, _, folder = ImapWatcher._parse_folder_line(line)
+                self.conn.select(folder, readonly=True)
+                ok, result = self.conn.search(None, '(UNSEEN)')
+                if ok != 'OK':
+                    continue
+                ids = result[0].decode().split()
+                if ids == []:
+                    continue
+                ok, result = self.conn.fetch(','.join(ids), '(UID RFC822)')
+                if ok != 'OK':
+                    continue
+                for uid_rfc822 in result:
+                    try:
+                        uid, rfc822 = uid_rfc822
+                    except:
+                        continue
+                    uid = ImapWatcher.uid_re.match(uid.decode()).group(1)
+                    unseen.add(uid)
+                    mapping[uid] = (folder, rfc822)
+
+            if first_run:
+                first_run = False
+                continue
+
+            difference = unseen - old_unseen
+            if difference == set():
+                continue
+
+            for uid in difference:
+                folder, rfc822 = mapping[uid]
+                mail = email.message_from_bytes(rfc822)
+                subject = ImapWatcher._decode_header(mail['subject'])
+                ct = mail.get_content_type()
+                fr = ImapWatcher._decode_header(mail['from'])
+                message = '{}/{}\r\n{}\r\n{}'.format(self.name, folder, fr,
+                                                     subject)
+                Recipient.send(message)
+                for part in mail.walk():
+                    print(part.get_content_type())
+                    print(str(part)[:50])
+
+    def _kill(self):
+        try:
+            self.conn.close()
+        except:
+            pass
+
+        try:
+            self.conn.logout()
+        except:
+            pass
 
 
 def main():
@@ -239,8 +350,12 @@ def main():
 
     config = ConfigParser()
     config.read_string('''
-    [modem-sms]
-    recipient=
+    [general]
+    backends=dummy
+    watchers=
+    [dummy]
+    [sms-modem]
+    number=
     port=
     baudrate=115200
     [otp]
@@ -253,14 +368,14 @@ def main():
     critical_error = False
 
     # Exit if there are config values missing
-    if len(config.get('modem-sms', 'recipient')) == 0:
+    if len(config.get('sms-modem', 'number')) == 0:
         log.critical('no sms recipient specified')
         critical_error = True
-    elif not config.get('modem-sms', 'recipient').startswith('+'):
+    elif not config.get('sms-modem', 'number').startswith('+'):
         log.critical('sms recipient numbers has to be international')
         critical_error = True
 
-    if len(config.get('modem-sms', 'port')) == 0:
+    if len(config.get('sms-modem', 'port')) == 0:
         log.critical('no modem port specified')
         critical_error = True
 
@@ -279,13 +394,25 @@ def main():
     # Initialize recipient
     #---------------------------------------------------------------------------
     try:
-        # Recipient via SMS
-        SmsModemRecipient(config.get('modem-sms', 'port'),
-                          config.getint('modem-sms', 'baudrate'),
-                          config.get('modem-sms', 'recipient'))
+        for backend in config.get('general', 'backends').split():
+            classname = re.sub(r'[^a-z]', '', backend.lower()) + 'recipient'
+            log.debug('Found backend "%s" -> class "%s"', backend, classname)
+            for subclass in Recipient.__subclasses__():
+                if subclass.__name__.lower() == classname:
+                    options = dict(config.items(backend))
+                    log.debug('Creating "%s"', subclass.__name__)
+                    subclass(**options)
+                    break
 
-        # Watch for new OTPs
-        OtpWatcher(config.get('otp', 'command'))
+        for watcher in config.get('general', 'watchers').split():
+            classname = re.sub(r'[^a-z]', '', watcher.lower()) + 'watcher'
+            log.debug('Found watcher "%s" -> class "%s"', watcher, classname)
+            for subclass in Watcher.__subclasses__():
+                if subclass.__name__.lower() == classname:
+                    options = dict(config.items(watcher))
+                    log.debug('Creating "%s"', subclass.__name__)
+                    subclass(**options)
+                    break
 
         # Wait for all watchers to end
         Watcher.join()
