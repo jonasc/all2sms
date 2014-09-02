@@ -28,6 +28,7 @@ class Recipient(object):
         pass
 
     def send(message):
+        message = message.strip()
         log.debug('Recipient.send: sending %s', message)
         with Recipient.send_lock:
             for recipient in Recipient.recipients:
@@ -159,7 +160,9 @@ class ImapWatcher(Watcher):
     def _decode_header(h):
         import email
         return ''.join(map(
-            lambda x: x[0].decode() if isinstance(x[0], bytes) else x[0],
+            lambda x: x[0].decode(
+                'utf-8' if x[1] is None else x[1]
+            ) if isinstance(x[0], bytes) else x[0],
             email.header.decode_header(h)
         ))
 
@@ -217,14 +220,21 @@ class ImapWatcher(Watcher):
                 folder, rfc822 = mapping[uid]
                 mail = email.message_from_bytes(rfc822)
                 subject = ImapWatcher._decode_header(mail['subject'])
-                ct = mail.get_content_type()
+                subject = re.sub(r'\s+', ' ', subject)
                 fr = ImapWatcher._decode_header(mail['from'])
-                message = '{}/{}\r\n{}\r\n{}'.format(self.name, folder, fr,
-                                                     subject)
-                Recipient.send(message)
+                fr = re.sub(r'\s+', ' ', fr)
+                content = ''
                 for part in mail.walk():
-                    print(part.get_content_type())
-                    print(str(part)[:50])
+                    if part.get_content_type() == 'text/plain':
+                        content = part.get_payload(decode=True).decode(
+                            part.get_content_charset())
+                        break
+                    if part.get_content_type() == 'multipart/encrypted':
+                        content = '<encrypted message>'
+                message = '{}/{}\r\n{}\r\n{}\r\n\r\n{}'.format(self.name,
+                                                               folder, fr,
+                                                               subject, content)
+                Recipient.send(message)
 
     def _kill(self):
         try:
