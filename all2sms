@@ -13,13 +13,49 @@ import re
 __version__ = '0.1.0'
 
 
-class Recipient(object):
-    recipients = []
-    send_lock = threading.Lock()
+class Backend(object):
+    backends = []
 
-    def __init__(self):
-        log.debug('Recipient.__init__: append %s', self)
-        Recipient.recipients.append(self)
+    @property
+    def __name__(self):
+        return str(self)
+
+    def debug(self, message, *args, **kwargs):
+        log.debug(str(self) + ': ' + message, *args, **kwargs)
+
+    def info(self, message, *args, **kwargs):
+        log.info(str(self) + ': ' + message, *args, **kwargs)
+
+    def warning(self, message, *args, **kwargs):
+        log.warning(str(self) + ': ' + message, *args, **kwargs)
+
+    def error(self, message, *args, **kwargs):
+        log.error(str(self) + ': ' + message, *args, **kwargs)
+
+    def critical(self, message, *args, **kwargs):
+        log.critical(str(self) + ': ' + message, *args, **kwargs)
+
+    def send(self, message):
+        Backend._send(message, self.backends)
+
+    def __init__(self, name=None):
+        import queue
+
+        if name is None:
+            name = self._default_name()
+
+        self.name = name
+        self._running = True
+
+        self._queue = queue.Queue()
+        self._thread = threading.Thread(target=self.thread, name=str(self))
+        self._thread.start()
+
+        Backend.backends.append(self)
+        self.debug('Backend.__init__: appended %s', self)
+
+    def _default_name(self):
+        raise NotImplementedError
 
     def _deliver(self, message):
         raise NotImplementedError('subclass has to implement deliver.')
@@ -27,58 +63,104 @@ class Recipient(object):
     def _finalize(self):
         pass
 
-    def send(message):
+    def join():
+        log.debug('Backend.join')
+        for backend in Backend.backends:
+            backend._thread.join()
+
+    def _kill(self):
+        pass
+
+    def thread(self):
+        import queue
+        while self._running:
+            try:
+                message = self._queue.get(timeout=1)
+                self._deliver(message)
+            except queue.Empty:
+                pass
+
+    def _send(message, backends):
         message = message.strip()
-        log.debug('Recipient.send: sending %s', message)
-        with Recipient.send_lock:
-            for recipient in Recipient.recipients:
-                recipient._deliver(message)
+        log.debug('Backend._send: sending %s', message.replace('\n', '\n    '))
+        for backend in Backend.backends:
+            if backends is None or backend.name in backends:
+                backend._queue.put(message)
 
     def end():
-        log.debug('Recipient.end')
-        for recipient in Recipient.recipients:
-            recipient._finalize()
+        log.debug('Backend.end')
+        for backend in Backend.backends:
+            backend._running = False
+            backend._kill()
+            backend._finalize()
+
+    def __str__(self):
+        return '%s[%s]' % (self.__class__.__name__, self.name)
 
 
-class DummyRecipient(Recipient):
+class DummyBackend(Backend):
     def _deliver(self, message):
-        log.info('Dummy.deliver: "{}"'.format(message))
+        log.info('Dummy.deliver: Delivering message')
+
+    def _default_name(self):
+        return 'dummy'
 
 
-class SmsModemRecipient(Recipient):
-    def __init__(self, port, baudrate, number):
-        super(SmsModemRecipient, self).__init__()
+class SmsModemBackend(Backend):
+    def __init__(self, port, number, baudrate=115200, name=None):
+        if name is None:
+            name = port
+        super(SmsModemBackend, self).__init__(name)
 
         from gsmmodem import GsmModem
 
         self.number = number
-        self.modem = GsmModem(port, int(baudrate))
+        self.port = port
+        self.baudrate = int(baudrate)
+        self.modem = GsmModem(self.port, self.baudrate)
         self.modem.connect()
-        log.info('Connected to gsm modem at %s @ %d', port, int(baudrate))
+        self.info('Connected to gsm modem at %s @ %d', self.port, self.baudrate)
 
     def _deliver(self, message):
-        log.info('Sending message to %s', self.number)
+        self.info('Sending message to %s', self.number)
         self.smsTextMode = False
         self.modem.sendSms(self.number, message)
 
     def _finalize(self):
-        log.debug('Closing connection to modem')
+        self.debug('Closing connection to modem')
         self.modem.close()
 
 
 class Watcher(object):
     watchers = []
 
-    def notify(self, message):
-        Recipient.send(message)
+    def debug(self, message, *args, **kwargs):
+        log.debug(str(self) + ': ' + message, *args, **kwargs)
 
-    def __init__(self):
-        log.debug('Watcher.__init__: append %s', self)
+    def info(self, message, *args, **kwargs):
+        log.info(str(self) + ': ' + message, *args, **kwargs)
+
+    def warning(self, message, *args, **kwargs):
+        log.warning(str(self) + ': ' + message, *args, **kwargs)
+
+    def error(self, message, *args, **kwargs):
+        log.error(str(self) + ': ' + message, *args, **kwargs)
+
+    def critical(self, message, *args, **kwargs):
+        log.critical(str(self) + ': ' + message, *args, **kwargs)
+
+    def send(self, message):
+        Backend.send(message, self.backends)
+
+    def __init__(self, name, backends=None):
         self._running = True
+        self.name = name
+        self.backends = backends
 
-        self._thread = threading.Thread(target=self.thread)
+        self._thread = threading.Thread(target=self.thread, name=str(self))
         self._thread.start()
         Watcher.watchers.append(self)
+        self.debug('Watcher.__init__: appended %s', self)
 
     def join():
         log.debug('Watcher.join')
@@ -97,12 +179,15 @@ class Watcher(object):
     def thread(self):
         raise NotImplementedError('Watcher subclass has to implement thread.')
 
+    def __str__(self):
+        return '%s[%s]' % (self.__class__.__name__, self.name)
+
 
 class OtpWatcher(Watcher):
-    def __init__(self, command):
+    def __init__(self, command, name='otp'):
         self.command = command.split()
 
-        super(OtpWatcher, self).__init__()
+        super(OtpWatcher, self).__init__(name)
 
     def thread(self):
         import subprocess
@@ -126,7 +211,7 @@ class OtpWatcher(Watcher):
             if otp == old_otp or otp == '':
                 continue
             old_otp = otp
-            Recipient.send('OTP: ' + otp)
+            self.send('OTP: ' + otp)
 
     def _kill(self):
         if self.process.poll() is None:
@@ -136,27 +221,19 @@ class OtpWatcher(Watcher):
                 pass
 
 
-class ImapWatcher(Watcher):
-    folder_line_re = re.compile(
-        r'\((?P<flags>.*?)\) "(?P<delimiter>.*)" (?P<name>.*)'
-    )
-    uid_re = re.compile(r'[0-9]+ \(UID (?P<uid>[0-9]+).*')
-
-    def __init__(self, user, password, host, port, name):
-        import imaplib
-        self.conn = imaplib.IMAP4_SSL(host, port)
+class ImapClientWatcher(Watcher):
+    def __init__(self, user, password, host, name, port=993, excludedirs='',
+                 **kwargs):
+        from imapclient import IMAPClient
+        self.host = host
+        self.user = user
+        self.conn = IMAPClient(host=host, port=port, ssl=True)
         self.conn.login(user, password)
-        self.name = name
+        self.excludedirs = excludedirs.split()
 
-        super(ImapWatcher, self).__init__()
+        super(ImapClientWatcher, self).__init__(name, **kwargs)
 
-    def _parse_folder_line(line):
-        if isinstance(line, bytes):
-            line = line.decode()
-        flags, delimiter, name = ImapWatcher.folder_line_re.match(line).groups()
-        name = name.strip('"')
-        return flags, delimiter, name
-
+    @staticmethod
     def _decode_header(h):
         import email
         return ''.join(map(
@@ -182,34 +259,22 @@ class ImapWatcher(Watcher):
             unseen = set()
             mapping = dict()
 
-            ok, result = self.conn.list()
-            if ok != 'OK':
-                log.debug('ImapWatcher: LIST result "%s"', ok)
-                continue
-
-            for line in result:
-                _, _, folder = ImapWatcher._parse_folder_line(line)
-                self.conn.select(folder, readonly=True)
-                ok, result = self.conn.search(None, '(UNSEEN)')
-                if ok != 'OK':
+            for flags, _, folder in self.conn.list_folders():
+                if folder in self.excludedirs:
                     continue
-                ids = result[0].decode().split()
+
+                self.conn.select_folder(folder, readonly=True)
+                ids = self.conn.search('(UNSEEN)')
                 if ids == []:
                     continue
-                ok, result = self.conn.fetch(','.join(ids), '(UID RFC822)')
-                if ok != 'OK':
-                    continue
-                for uid_rfc822 in result:
-                    try:
-                        uid, rfc822 = uid_rfc822
-                    except:
-                        continue
-                    uid = ImapWatcher.uid_re.match(uid.decode()).group(1)
+                result = self.conn.fetch(ids, ['RFC822'])
+                for uid, data in result.items():
                     unseen.add(uid)
-                    mapping[uid] = (folder, rfc822)
+                    mapping[uid] = (folder, data['RFC822'])
 
             if first_run:
                 first_run = False
+                self.debug('ready')
                 continue
 
             difference = unseen - old_unseen
@@ -218,10 +283,10 @@ class ImapWatcher(Watcher):
 
             for uid in difference:
                 folder, rfc822 = mapping[uid]
-                mail = email.message_from_bytes(rfc822)
-                subject = ImapWatcher._decode_header(mail['subject'])
+                mail = email.message_from_string(rfc822)
+                subject = self._decode_header(mail['subject'])
                 subject = re.sub(r'\s+', ' ', subject)
-                fr = ImapWatcher._decode_header(mail['from'])
+                fr = self._decode_header(mail['from'])
                 fr = re.sub(r'\s+', ' ', fr)
                 content = ''
                 for part in mail.walk():
@@ -231,19 +296,33 @@ class ImapWatcher(Watcher):
                         break
                     if part.get_content_type() == 'multipart/encrypted':
                         content = '<encrypted message>'
+
+                lines = content.splitlines()
+                lines.reverse()
+                while lines and (lines[0].startswith('>') or lines[0] == ''):
+                    lines.pop(0)
+                for i, line in enumerate(lines):
+                    if re.match(r'^(-+|_+)$', line.strip()):
+                        lines = lines[i+1:]
+                        break
+                lines.reverse()
+                content = '\r\n'.join(lines)
+
                 message = '{}/{}\r\n{}\r\n{}\r\n\r\n{}'.format(self.name,
                                                                folder, fr,
                                                                subject, content)
-                Recipient.send(message)
+                self.send(message)
 
     def _kill(self):
         try:
-            self.conn.close()
+            self.conn.close_folder()
+            self.debug('Closed folder')
         except:
             pass
 
         try:
             self.conn.logout()
+            self.debug('Logged out', extra=dict(threadName=str(self)))
         except:
             pass
 
@@ -334,7 +413,8 @@ def main():
 
     log_handler = log.StreamHandler()
     log_handler.setLevel(args.log_level)
-    log_handler.setFormatter(log.Formatter('%(levelname)s: %(message)s'))
+    log_handler.setFormatter(log.Formatter('%(levelname)s: %(module)s: '
+                                           '%(message)s'))
 
     log.getLogger().addHandler(log_handler)
 
@@ -363,7 +443,6 @@ def main():
     [general]
     backends=dummy
     watchers=
-    [dummy]
     [sms-modem]
     number=
     port=
@@ -379,47 +458,55 @@ def main():
 
     # Exit if there are config values missing
     if len(config.get('sms-modem', 'number')) == 0:
-        log.critical('no sms recipient specified')
+        log.error('no sms recipient specified')
         critical_error = True
     elif not config.get('sms-modem', 'number').startswith('+'):
-        log.critical('sms recipient numbers has to be international')
+        log.error('sms recipient numbers has to be international')
         critical_error = True
 
     if len(config.get('sms-modem', 'port')) == 0:
-        log.critical('no modem port specified')
+        log.error('no modem port specified')
         critical_error = True
 
     if len(config.get('otp', 'command')) == 0:
-        log.critical('no otp command specified')
+        log.error('no otp command specified')
         critical_error = True
 
     if critical_error:
-        log.error('critical errors with missing config options - exiting')
+        log.critical('critical errors with missing config options - exiting')
         sys.exit(1)
 
     #===========================================================================
     # The program
     #===========================================================================
 
-    # Initialize recipient
+    # Initialize backends
     #---------------------------------------------------------------------------
     try:
         for backend in config.get('general', 'backends').split():
-            classname = re.sub(r'[^a-z]', '', backend.lower()) + 'recipient'
+            classname = re.sub(r'[^a-z]', '', backend.lower()) + 'backend'
             log.debug('Found backend "%s" -> class "%s"', backend, classname)
-            for subclass in Recipient.__subclasses__():
+            for subclass in Backend.__subclasses__():
                 if subclass.__name__.lower() == classname:
-                    options = dict(config.items(backend))
+                    try:
+                        options = dict(config.items(backend))
+                    except:
+                        options = dict()
                     log.debug('Creating "%s"', subclass.__name__)
                     subclass(**options)
                     break
 
+    # Initialize watchers
+    #---------------------------------------------------------------------------
         for watcher in config.get('general', 'watchers').split():
             classname = re.sub(r'[^a-z]', '', watcher.lower()) + 'watcher'
             log.debug('Found watcher "%s" -> class "%s"', watcher, classname)
             for subclass in Watcher.__subclasses__():
                 if subclass.__name__.lower() == classname:
-                    options = dict(config.items(watcher))
+                    try:
+                        options = dict(config.items(watcher))
+                    except:
+                        options = dict()
                     log.debug('Creating "%s"', subclass.__name__)
                     subclass(**options)
                     break
@@ -433,7 +520,7 @@ def main():
         sys.exit(1)
 
     finally:
-        Recipient.end()
+        Backend.end()
 
 
 if __name__ == '__main__':
