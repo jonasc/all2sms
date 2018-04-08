@@ -121,7 +121,10 @@ class SmsModemBackend(Backend):
     def _deliver(self, message):
         self.info('Sending message to %s', self.number)
         self.smsTextMode = False
-        self.modem.sendSms(self.number, message)
+        try:
+            self.modem.sendSms(self.number, message)
+        except Exception:
+            self.error('Could not deliver message')
 
     def _finalize(self):
         self.debug('Closing connection to modem')
@@ -243,6 +246,7 @@ class ImapClientWatcher(Watcher):
     def thread(self):
         import time
         import email
+        import html2text
 
         first_run = True
         old_unseen = set()
@@ -286,13 +290,23 @@ class ImapClientWatcher(Watcher):
                 fr = self._decode_header(mail['from'])
                 fr = re.sub(r'\s+', ' ', fr)
                 content = ''
+                html_content = ''
                 for part in mail.walk():
                     if part.get_content_type() == 'text/plain':
                         content = part.get_payload(decode=True).decode(
                             part.get_content_charset())
                         break
-                    if part.get_content_type() == 'multipart/encrypted':
+                    elif part.get_content_type() == 'text/html':
+                        html_content = html2text.html2text(
+                            part.get_payload(decode=True).decode(
+                                part.get_content_charset()
+                            )
+                        )
+                    elif part.get_content_type() == 'multipart/encrypted':
                         content = '<encrypted message>'
+
+                if content == '' and html_content != '':
+                    content = html_content
 
                 lines = content.splitlines()
                 lines.reverse()
